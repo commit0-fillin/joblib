@@ -29,7 +29,14 @@ def extract_first_line(func_code):
     """ Extract the first line information from the function code
         text if available.
     """
-    pass
+    if func_code is None:
+        return None
+    
+    lines = func_code.split('\n')
+    for line in lines:
+        if line.strip().startswith(FIRST_LINE_TEXT):
+            return line.strip()[len(FIRST_LINE_TEXT):].strip()
+    return None
 
 class JobLibCollisionWarning(UserWarning):
     """ Warn that there might be a collision between names of functions.
@@ -54,15 +61,57 @@ def register_store_backend(backend_name, backend):
         The name of a class that implements the StoreBackendBase interface.
 
     """
-    pass
+    if not issubclass(backend, StoreBackendBase):
+        raise ValueError("The backend class should be a subclass of StoreBackendBase.")
+    
+    if backend_name in _STORE_BACKENDS:
+        warnings.warn(f"Overriding existing backend '{backend_name}'.")
+    
+    _STORE_BACKENDS[backend_name] = backend
 
 def _store_backend_factory(backend, location, verbose=0, backend_options=None):
     """Return the correct store object for the given location."""
-    pass
+    if backend_options is None:
+        backend_options = {}
+
+    if isinstance(backend, str):
+        if backend not in _STORE_BACKENDS:
+            raise ValueError(f"Unknown backend: {backend}. "
+                             f"Available backends are: {list(_STORE_BACKENDS.keys())}")
+        backend_class = _STORE_BACKENDS[backend]
+    elif isinstance(backend, type) and issubclass(backend, StoreBackendBase):
+        backend_class = backend
+    else:
+        raise ValueError("Backend should be either a string or a StoreBackendBase subclass.")
+
+    backend_instance = backend_class()
+    backend_instance.configure(location, verbose=verbose, backend_options=backend_options)
+    return backend_instance
 
 def _build_func_identifier(func):
     """Build a roughly unique identifier for the cached function."""
-    pass
+    func_id = []
+    try:
+        func_code = get_func_code(func)
+        if func_code is not None:
+            func_id.append(func_code)
+    except Exception:
+        pass
+
+    if hasattr(func, '__name__'):
+        func_id.append(func.__name__)
+
+    if hasattr(func, '__module__'):
+        func_id.append(func.__module__)
+
+    # Include the function's class if it's a method
+    if hasattr(func, '__self__'):
+        try:
+            func_id.append(func.__self__.__class__.__name__)
+        except AttributeError:
+            pass
+
+    return ':'.join(func_id)
 _FUNCTION_HASHES = weakref.WeakKeyDictionary()
 
 class MemorizedResult(Logger):
