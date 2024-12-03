@@ -167,7 +167,12 @@ class _SafeQueue(Queue):
 
 def _get_chunks(chunksize, *iterables):
     """Iterates over zip()ed iterables in chunks."""
-    pass
+    it = zip(*iterables)
+    while True:
+        chunk = tuple(itertools.islice(it, chunksize))
+        if not chunk:
+            return
+        yield chunk
 
 def _process_chunk(fn, chunk):
     """Processes a chunk of an iterable passed to map.
@@ -178,11 +183,17 @@ def _process_chunk(fn, chunk):
     This function is run in a separate process.
 
     """
-    pass
+    return [fn(*args) for args in chunk]
 
 def _sendback_result(result_queue, work_id, result=None, exception=None):
     """Safely send back the given result or exception"""
-    pass
+    try:
+        result_item = _ResultItem(work_id, exception, result)
+        result_queue.put(result_item)
+    except BaseException as e:
+        exc = _ExceptionWithTraceback(e, e.__traceback__)
+        result_item = _ResultItem(work_id, exc)
+        result_queue.put(result_item)
 
 def _process_worker(call_queue, result_queue, initializer, initargs, processes_management_lock, timeout, worker_exit_lock, current_depth):
     """Evaluates calls from call_queue and places the results in result_queue.
@@ -204,7 +215,29 @@ def _process_worker(call_queue, result_queue, initializer, initargs, processes_m
             workers timeout.
         current_depth: Nested parallelism level, to avoid infinite spawning.
     """
-    pass
+    if initializer is not None:
+        try:
+            initializer(*initargs)
+        except BaseException:
+            _base.LOGGER.critical('Exception in initializer:', exc_info=True)
+            return
+
+    while True:
+        try:
+            call_item = call_queue.get(block=True, timeout=timeout)
+        except queue.Empty:
+            with worker_exit_lock:
+                return
+        if call_item is None:
+            return
+        try:
+            r = call_item()
+        except BaseException as e:
+            exc = _ExceptionWithTraceback(e, e.__traceback__)
+            _sendback_result(result_queue, call_item.work_id, exception=exc)
+        else:
+            _sendback_result(result_queue, call_item.work_id, result=r)
+        del call_item
 
 class _ExecutorManagerThread(threading.Thread):
     """Manages the communication between this process and the worker processes.
@@ -248,7 +281,8 @@ def _chain_from_iterable_of_lists(iterable):
     Each item in *iterable* should be a list.  This function is
     careful not to keep references to yielded objects.
     """
-    pass
+    for element in iterable:
+        yield from element
 
 class LokyRecursionError(RuntimeError):
     """A process tries to spawn too many levels of nested processes."""
@@ -338,7 +372,11 @@ class ProcessPoolExecutor(Executor):
 
     def _ensure_executor_running(self):
         """ensures all workers and management thread are running"""
-        pass
+        with self._processes_management_lock:
+            if len(self._processes) == 0:
+                self._start_processes()
+            if self._executor_manager_thread is None:
+                self._start_executor_manager_thread()
     submit.__doc__ = Executor.submit.__doc__
 
     def map(self, fn, *iterables, **kwargs):
@@ -363,5 +401,12 @@ class ProcessPoolExecutor(Executor):
                 before the given timeout.
             Exception: If fn(*args) raises for any values.
         """
-        pass
+        timeout = kwargs.get('timeout', None)
+        chunksize = kwargs.get('chunksize', 1)
+
+        if chunksize < 1:
+            raise ValueError("chunksize must be >= 1.")
+
+        results = super().map(fn, *iterables, timeout=timeout)
+        return _chain_from_iterable_of_lists(results)
     shutdown.__doc__ = Executor.shutdown.__doc__
