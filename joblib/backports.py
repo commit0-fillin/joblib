@@ -90,7 +90,17 @@ try:
           newly-created memmap that sends a maybe_unlink request for the
           memmaped file to resource_tracker.
         """
-        pass
+        mm = np.memmap(filename, dtype=dtype, mode=mode, offset=offset,
+                       shape=shape, order=order)
+        
+        if unlink_on_gc_collect:
+            def cleanup():
+                from .externals.loky.backend import resource_tracker
+                resource_tracker.maybe_unlink(filename)
+            
+            util.finalize(mm, cleanup)
+        
+        return mm
 except ImportError:
 if os.name == 'nt':
     access_denied_errors = (5, 13)
@@ -102,6 +112,14 @@ if os.name == 'nt':
         On Windows os.replace can yield permission errors if executed by two
         different processes.
         """
-        pass
+        for i in range(10):  # Try up to 10 times
+            try:
+                return replace(src, dst)
+            except WindowsError as e:
+                if e.winerror not in access_denied_errors:
+                    raise
+                time.sleep(0.1 * (2 ** i))  # Exponential backoff
+        
+        raise WindowsError("Failed to rename after multiple attempts")
 else:
     from os import replace as concurrency_safe_rename
