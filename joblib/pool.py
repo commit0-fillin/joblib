@@ -60,7 +60,10 @@ class CustomizablePickler(Pickler):
 
     def register(self, type, reduce_func):
         """Attach a reducer function to a given type in the dispatch table."""
-        pass
+        if hasattr(self, 'dispatch'):
+            self.dispatch[type] = reduce_func
+        else:
+            self.dispatch_table[type] = reduce_func
 
 class CustomizablePicklingQueue(object):
     """Locked Pipe implementation that uses a customizable pickler.
@@ -96,6 +99,10 @@ class CustomizablePicklingQueue(object):
     def __setstate__(self, state):
         self._reader, self._writer, self._rlock, self._wlock, self._reducers = state
         self._make_methods()
+        if self._reducers is not None:
+            self._pickler = CustomizablePickler(self._writer.buffer, self._reducers)
+        else:
+            self._pickler = Pickler(self._writer.buffer, protocol=HIGHEST_PROTOCOL)
 
 class PicklingPool(Pool):
     """Pool implementation with customizable pickling reducers.
@@ -123,6 +130,15 @@ class PicklingPool(Pool):
         self._backward_reducers = backward_reducers
         poolargs = dict(processes=processes)
         poolargs.update(kwargs)
+        
+        # Create a customized queue for the pool
+        self._forward_queue = CustomizablePicklingQueue(mp.get_context(), reducers=forward_reducers)
+        self._backward_queue = CustomizablePicklingQueue(mp.get_context(), reducers=backward_reducers)
+        
+        # Update poolargs with the custom queues
+        poolargs['forward_queue'] = self._forward_queue
+        poolargs['backward_queue'] = self._backward_queue
+        
         super(PicklingPool, self).__init__(**poolargs)
 
 class MemmappingPool(PicklingPool):
