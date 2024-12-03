@@ -2,7 +2,12 @@ import warnings
 
 def _viztracer_init(init_kwargs):
     """Initialize viztracer's profiler in worker processes"""
-    pass
+    try:
+        import viztracer
+        tracer = viztracer.VizTracer(**init_kwargs)
+        tracer.start()
+    except ImportError:
+        warnings.warn("viztracer is not installed. Profiling will be disabled.")
 
 class _ChainedInitializer:
     """Compound worker initializer
@@ -23,4 +28,11 @@ def _chain_initializers(initializer_and_args):
 
     If some initializers are None, they are filtered out.
     """
-    pass
+    valid_initializers = [(init, args) for init, args in initializer_and_args if init is not None]
+    if not valid_initializers:
+        return None
+    elif len(valid_initializers) == 1:
+        return valid_initializers[0]
+    else:
+        initializers, args_list = zip(*valid_initializers)
+        return _ChainedInitializer(initializers), args_list
