@@ -38,7 +38,8 @@ _backend = threading.local()
 
 def _register_dask():
     """Register Dask Backend if called with parallel_config(backend="dask")"""
-    pass
+    from ._dask import DaskDistributedBackend
+    register_parallel_backend('dask', DaskDistributedBackend)
 EXTERNAL_BACKENDS = {'dask': _register_dask}
 default_parallel_config = {'backend': _Sentinel(default_value=None), 'n_jobs': _Sentinel(default_value=None), 'verbose': _Sentinel(default_value=0), 'temp_folder': _Sentinel(default_value=None), 'max_nbytes': _Sentinel(default_value='1M'), 'mmap_mode': _Sentinel(default_value='r'), 'prefer': _Sentinel(default_value=None), 'require': _Sentinel(default_value=None)}
 VALID_BACKEND_HINTS = ('processes', 'threads', None)
@@ -50,15 +51,36 @@ def _get_config_param(param, context_config, key):
     Explicitly setting it in Parallel has priority over setting in a
     parallel_(config/backend) context manager.
     """
-    pass
+    if not isinstance(param, _Sentinel):
+        return param
+    return context_config.get(key, default_parallel_config[key])
 
 def get_active_backend(prefer=default_parallel_config['prefer'], require=default_parallel_config['require'], verbose=default_parallel_config['verbose']):
     """Return the active default backend"""
-    pass
+    return _get_active_backend(prefer=prefer, require=require, verbose=verbose)[0]
 
 def _get_active_backend(prefer=default_parallel_config['prefer'], require=default_parallel_config['require'], verbose=default_parallel_config['verbose']):
     """Return the active default backend"""
-    pass
+    context_config = getattr(_backend, 'config', default_parallel_config)
+    backend = context_config['backend']
+    if isinstance(backend, _Sentinel):
+        backend = None
+    if backend is None:
+        backend = DEFAULT_BACKEND
+        if require == 'sharedmem':
+            backend = DEFAULT_THREAD_BACKEND
+        elif prefer == 'threads':
+            backend = DEFAULT_THREAD_BACKEND
+        elif prefer == 'processes':
+            backend = DEFAULT_BACKEND
+    if isinstance(backend, str):
+        backend_args = {}
+        if backend == 'dask':
+            _register_dask()
+        if backend not in BACKENDS:
+            raise ValueError(f"Invalid backend: {backend}")
+        backend = BACKENDS[backend](**backend_args)
+    return backend, context_config
 
 class parallel_config:
     """Set the default backend or configuration for :class:`~joblib.Parallel`.
@@ -351,7 +373,7 @@ def cpu_count(only_physical_cores=False):
     If only_physical_cores is True, do not take hyperthreading / SMT logical
     cores into account.
     """
-    pass
+    return process_executor.cpu_count(only_physical_cores=only_physical_cores)
 
 def _verbosity_filter(index, verbose):
     """ Returns False for indices increasingly apart, the distance
@@ -359,11 +381,20 @@ def _verbosity_filter(index, verbose):
 
         We use a lag increasing as the square of index
     """
-    pass
+    if not verbose:
+        return False
+    elif verbose > 10:
+        return True
+    if index == 0:
+        return True
+    verbose = verbose ** 2
+    return (index % verbose) == 0
 
 def delayed(function):
     """Decorator used to capture the arguments of a function."""
-    pass
+    def delayed_function(*args, **kwargs):
+        return function, args, kwargs
+    return delayed_function
 
 class BatchCompletionCallBack(object):
     """Callback to keep track of completed results and schedule the next tasks.
