@@ -39,7 +39,11 @@ def register_compressor(compressor_name, compressor, force=False):
     compressor: CompressorWrapper
         An instance of a 'CompressorWrapper'.
     """
-    pass
+    global _COMPRESSORS
+    if compressor_name in _COMPRESSORS and not force:
+        raise ValueError(f"Compressor '{compressor_name}' already registered. "
+                         "Use force=True to override.")
+    _COMPRESSORS[compressor_name] = compressor
 
 class CompressorWrapper:
     """A wrapper around a compressor file object.
@@ -64,11 +68,13 @@ class CompressorWrapper:
 
     def compressor_file(self, fileobj, compresslevel=None):
         """Returns an instance of a compressor file object."""
-        pass
+        if compresslevel is not None:
+            return self.fileobj_factory(fileobj, 'wb', compresslevel=compresslevel)
+        return self.fileobj_factory(fileobj, 'wb')
 
     def decompressor_file(self, fileobj):
         """Returns an instance of a decompressor file object."""
-        pass
+        return self.fileobj_factory(fileobj, 'rb')
 
 class BZ2CompressorWrapper(CompressorWrapper):
     prefix = _BZ2_PREFIX
@@ -82,11 +88,17 @@ class BZ2CompressorWrapper(CompressorWrapper):
 
     def compressor_file(self, fileobj, compresslevel=None):
         """Returns an instance of a compressor file object."""
-        pass
+        if self.fileobj_factory is None:
+            raise ValueError(LZ4_NOT_INSTALLED_ERROR)
+        if compresslevel is not None:
+            return self.fileobj_factory(fileobj, 'wb', compresslevel=compresslevel)
+        return self.fileobj_factory(fileobj, 'wb')
 
     def decompressor_file(self, fileobj):
         """Returns an instance of a decompressor file object."""
-        pass
+        if self.fileobj_factory is None:
+            raise ValueError(LZ4_NOT_INSTALLED_ERROR)
+        return self.fileobj_factory(fileobj, 'rb')
 
 class LZMACompressorWrapper(CompressorWrapper):
     prefix = _LZMA_PREFIX
@@ -102,11 +114,17 @@ class LZMACompressorWrapper(CompressorWrapper):
 
     def compressor_file(self, fileobj, compresslevel=None):
         """Returns an instance of a compressor file object."""
-        pass
+        if self.fileobj_factory is None:
+            raise ValueError("LZMA is not installed.")
+        if compresslevel is not None:
+            return self.fileobj_factory(fileobj, 'wb', format=self._lzma_format, preset=compresslevel)
+        return self.fileobj_factory(fileobj, 'wb', format=self._lzma_format)
 
     def decompressor_file(self, fileobj):
         """Returns an instance of a decompressor file object."""
-        pass
+        if self.fileobj_factory is None:
+            raise ValueError("LZMA is not installed.")
+        return self.fileobj_factory(fileobj, 'rb', format=self._lzma_format)
 
 class XZCompressorWrapper(LZMACompressorWrapper):
     prefix = _XZ_PREFIX
@@ -125,11 +143,17 @@ class LZ4CompressorWrapper(CompressorWrapper):
 
     def compressor_file(self, fileobj, compresslevel=None):
         """Returns an instance of a compressor file object."""
-        pass
+        if self.fileobj_factory is None:
+            raise ValueError(LZ4_NOT_INSTALLED_ERROR)
+        if compresslevel is not None:
+            return self.fileobj_factory(fileobj, 'wb', compression_level=compresslevel)
+        return self.fileobj_factory(fileobj, 'wb')
 
     def decompressor_file(self, fileobj):
         """Returns an instance of a decompressor file object."""
-        pass
+        if self.fileobj_factory is None:
+            raise ValueError(LZ4_NOT_INSTALLED_ERROR)
+        return self.fileobj_factory(fileobj, 'rb')
 _MODE_CLOSED = 0
 _MODE_READ = 1
 _MODE_READ_EOF = 2
@@ -195,28 +219,47 @@ class BinaryZlibFile(io.BufferedIOBase):
         May be called more than once without error. Once the file is
         closed, any other operation on it will raise a ValueError.
         """
-        pass
+        with self._lock:
+            if self._mode == _MODE_CLOSED:
+                return
+            try:
+                if self._mode in (_MODE_READ, _MODE_READ_EOF):
+                    self._decompressor = None
+                elif self._mode == _MODE_WRITE:
+                    self._fp.write(self._compressor.flush())
+                    self._compressor = None
+            finally:
+                try:
+                    if self._closefp:
+                        self._fp.close()
+                finally:
+                    self._fp = None
+                    self._closefp = False
+                    self._mode = _MODE_CLOSED
 
     @property
     def closed(self):
         """True if this file is closed."""
-        pass
+        return self._mode == _MODE_CLOSED
 
     def fileno(self):
         """Return the file descriptor for the underlying file."""
-        pass
+        self._check_not_closed()
+        return self._fp.fileno()
 
     def seekable(self):
         """Return whether the file supports seeking."""
-        pass
+        return self.readable()
 
     def readable(self):
         """Return whether the file was opened for reading."""
-        pass
+        self._check_not_closed()
+        return self._mode in (_MODE_READ, _MODE_READ_EOF)
 
     def writable(self):
         """Return whether the file was opened for writing."""
-        pass
+        self._check_not_closed()
+        return self._mode == _MODE_WRITE
 
     def read(self, size=-1):
         """Read up to size uncompressed bytes from the file.
@@ -224,14 +267,27 @@ class BinaryZlibFile(io.BufferedIOBase):
         If size is negative or omitted, read until EOF is reached.
         Returns b'' if the file is already at EOF.
         """
-        pass
+        with self._lock:
+            self._check_can_read()
+            if size == 0:
+                return b""
+            
+            if self._mode == _MODE_READ_EOF or size < 0:
+                return self._read_all()
+            
+            return self._read_limited(size)
 
     def readinto(self, b):
         """Read up to len(b) bytes into b.
 
         Returns the number of bytes read (0 for EOF).
         """
-        pass
+        with self._lock:
+            self._check_can_read()
+            data = self.read(len(b))
+            n = len(data)
+            b[:n] = data
+            return n
 
     def write(self, data):
         """Write a byte string to the file.
@@ -240,7 +296,12 @@ class BinaryZlibFile(io.BufferedIOBase):
         always len(data). Note that due to buffering, the file on disk
         may not reflect the data written until close() is called.
         """
-        pass
+        with self._lock:
+            self._check_can_write()
+            compressed = self._compressor.compress(data)
+            self._fp.write(compressed)
+            self._pos += len(data)
+            return len(data)
 
     def seek(self, offset, whence=0):
         """Change the file position.
@@ -257,11 +318,90 @@ class BinaryZlibFile(io.BufferedIOBase):
         Note that seeking is emulated, so depending on the parameters,
         this operation may be extremely slow.
         """
-        pass
+        with self._lock:
+            self._check_can_seek()
+            
+            if whence == 0:
+                if offset < 0:
+                    raise ValueError("Negative seek position {}".format(offset))
+                return self._seek_forward(offset)
+            elif whence == 1:
+                return self._seek_forward(self._pos + offset)
+            elif whence == 2:
+                if offset > 0:
+                    raise ValueError("Positive seek position {}".format(offset))
+                return self._seek_backward(offset)
+            else:
+                raise ValueError("Invalid whence value")
 
     def tell(self):
         """Return the current file position."""
-        pass
+        self._check_not_closed()
+        return self._pos
+
+    def _check_not_closed(self):
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+
+    def _check_can_read(self):
+        if self._mode not in (_MODE_READ, _MODE_READ_EOF):
+            raise io.UnsupportedOperation("File not open for reading")
+
+    def _check_can_write(self):
+        if self._mode != _MODE_WRITE:
+            raise io.UnsupportedOperation("File not open for writing")
+
+    def _check_can_seek(self):
+        if self._mode not in (_MODE_READ, _MODE_READ_EOF):
+            raise io.UnsupportedOperation("Seeking is only supported on files open for reading")
+
+    def _read_all(self):
+        chunks = []
+        while True:
+            chunk = self._fp.read(_BUFFER_SIZE)
+            if not chunk:
+                break
+            decompressed = self._decompressor.decompress(chunk)
+            if decompressed:
+                chunks.append(decompressed)
+        if self._decompressor.unused_data:
+            self._fp.seek(-len(self._decompressor.unused_data), 1)
+        self._mode = _MODE_READ_EOF
+        return b"".join(chunks)
+
+    def _read_limited(self, size):
+        chunks = []
+        while size > 0:
+            chunk = self._fp.read(min(_BUFFER_SIZE, size))
+            if not chunk:
+                break
+            decompressed = self._decompressor.decompress(chunk)
+            if decompressed:
+                chunks.append(decompressed)
+                size -= len(decompressed)
+        if self._decompressor.unused_data:
+            self._fp.seek(-len(self._decompressor.unused_data), 1)
+        return b"".join(chunks)
+
+    def _seek_forward(self, offset):
+        if offset < self._pos:
+            raise ValueError("Negative seek in forward direction")
+        self._pos = offset
+        return self._pos
+
+    def _seek_backward(self, offset):
+        if offset > 0:
+            raise ValueError("Positive seek in backward direction")
+        self._fp.seek(0)
+        self._decompressor = zlib.decompressobj(self.wbits)
+        self._pos = 0
+        while self._pos < offset:
+            chunk = self._fp.read(min(_BUFFER_SIZE, offset - self._pos))
+            if not chunk:
+                break
+            decompressed = self._decompressor.decompress(chunk)
+            self._pos += len(decompressed)
+        return self._pos
 
 class ZlibCompressorWrapper(CompressorWrapper):
 
