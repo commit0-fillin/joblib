@@ -31,7 +31,10 @@ class Queue(mp_Queue):
         Private API hook called when feeding data in the background thread
         raises an exception.  For overriding by concurrent.futures.
         """
-        pass
+        import traceback
+        traceback.print_exc()
+        print(f"Error in queue feeder: {e}")
+        print(f"Failed to feed object: {obj}")
 
 class SimpleQueue(mp_SimpleQueue):
 
