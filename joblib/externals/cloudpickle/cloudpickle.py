@@ -103,11 +103,13 @@ def register_pickle_by_value(module):
     Note: this feature is considered experimental. See the cloudpickle
     README.md file for more details and limitations.
     """
-    pass
+    global _PICKLE_BY_VALUE_MODULES
+    _PICKLE_BY_VALUE_MODULES.add(module)
 
 def unregister_pickle_by_value(module):
     """Unregister that the input module should be pickled by value."""
-    pass
+    global _PICKLE_BY_VALUE_MODULES
+    _PICKLE_BY_VALUE_MODULES.discard(module)
 
 def _whichmodule(obj, name):
     """Find the module an object belongs to.
@@ -118,7 +120,20 @@ def _whichmodule(obj, name):
     - Errors arising during module introspection are ignored, as those errors
       are considered unwanted side effects.
     """
-    pass
+    if isinstance(obj, types.ModuleType):
+        return obj.__name__
+    module_name = getattr(obj, '__module__', None)
+    if module_name is not None:
+        return module_name
+    for module_name, module in list(sys.modules.items()):
+        if module_name == '__main__':
+            continue
+        try:
+            if getattr(module, name, None) is obj:
+                return module_name
+        except Exception:
+            pass
+    return None
 
 def _should_pickle_by_reference(obj, name=None):
     """Test whether an function or a class should be pickled by reference
@@ -134,7 +149,30 @@ def _should_pickle_by_reference(obj, name=None):
     functions and classes or for attributes of modules that have been
     explicitly registered to be pickled by value.
     """
-    pass
+    if name is None:
+        name = getattr(obj, '__qualname__', None)
+    if name is None:
+        name = getattr(obj, '__name__', None)
+    
+    module_name = _whichmodule(obj, name)
+    if module_name is None:
+        return False
+    
+    if module_name == "__main__":
+        return False
+    
+    module = sys.modules.get(module_name, None)
+    if module is None:
+        return False
+    
+    if module in _PICKLE_BY_VALUE_MODULES:
+        return False
+    
+    if name is None:
+        return False
+    
+    attribute = getattr(module, name, None)
+    return attribute is obj
 
 def _extract_code_globals(co):
     """Find all globals names read or written to by codeblock co."""
