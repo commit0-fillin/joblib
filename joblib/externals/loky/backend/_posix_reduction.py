@@ -8,7 +8,9 @@ HAVE_SEND_HANDLE = hasattr(socket, 'CMSG_LEN') and hasattr(socket, 'SCM_RIGHTS')
 
 def DupFd(fd):
     """Return a wrapper for an fd."""
-    pass
+    def rebuild():
+        return os.dup(fd)
+    return rebuild
 register(socket.socket, _reduce_socket)
 register(_socket.socket, _reduce_socket)
 register(Connection, reduce_connection)
