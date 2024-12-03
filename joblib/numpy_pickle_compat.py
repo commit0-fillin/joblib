@@ -10,7 +10,7 @@ from .numpy_pickle_utils import _ensure_native_byte_order
 
 def hex_str(an_int):
     """Convert an int to an hexadecimal string."""
-    pass
+    return f"{an_int:x}"
 _MAX_LEN = len(hex_str(2 ** 64))
 _CHUNK_SIZE = 64 * 1024
 
@@ -21,7 +21,11 @@ def read_zfile(file_handle):
     for persistence. Backward compatibility is not guaranteed. Do not
     use for external purposes.
     """
-    pass
+    file_handle.seek(0)
+    header_length = len(_ZFILE_PREFIX)
+    length = int(file_handle.read(_MAX_LEN))
+    data = file_handle.read(length)
+    return zlib.decompress(data)
 
 def write_zfile(file_handle, data, compress=1):
     """Write the data in the given file as a Z-file.
@@ -30,7 +34,11 @@ def write_zfile(file_handle, data, compress=1):
     for persistence. Backward compatibility is not guaranteed. Do not
     use for external purposes.
     """
-    pass
+    compressed_data = zlib.compress(data, compress)
+    file_handle.write(_ZFILE_PREFIX)
+    file_handle.write(hex_str(len(compressed_data)).encode('ascii'))
+    file_handle.write(b'\n')
+    file_handle.write(compressed_data)
 
 class NDArrayWrapper(object):
     """An object to be persisted instead of numpy arrays.
@@ -47,7 +55,13 @@ class NDArrayWrapper(object):
 
     def read(self, unpickler):
         """Reconstruct the array."""
-        pass
+        import numpy as np
+        filename = os.path.join(unpickler._dirname, self.filename)
+        if self.allow_mmap and unpickler.mmap_mode is not None:
+            array = np.load(filename, mmap_mode=unpickler.mmap_mode)
+        else:
+            array = np.load(filename, mmap_mode=None)
+        return array.view(self.subclass)
 
 class ZNDArrayWrapper(NDArrayWrapper):
     """An object to be persisted instead of numpy arrays.
@@ -72,7 +86,16 @@ class ZNDArrayWrapper(NDArrayWrapper):
 
     def read(self, unpickler):
         """Reconstruct the array from the meta-information and the z-file."""
-        pass
+        import numpy as np
+        filename = os.path.join(unpickler._dirname, self.filename)
+        with open(filename, 'rb') as f:
+            array_bytes = read_zfile(f)
+        array = np.frombuffer(array_bytes, dtype=self.state['descr'])
+        array.shape = self.state['shape']
+        array = array.view(self.state['type'])
+        if self.state.get('fortran_order'):
+            array = array.T
+        return array
 
 class ZipNumpyUnpickler(Unpickler):
     """A subclass of the Unpickler to unpickle our numpy pickles."""
@@ -98,7 +121,27 @@ class ZipNumpyUnpickler(Unpickler):
         NDArrayWrapper, by the array we are interested in. We
         replace them directly in the stack of pickler.
         """
-        pass
+        stack = self.stack
+        state = stack.pop()
+        instance = stack[-1]
+        if isinstance(instance, NDArrayWrapper):
+            # We replace the instance by the result of the
+            # read
+            array = instance.read(self)
+            stack[-1] = array
+        else:
+            setstate = getattr(instance, "__setstate__", None)
+            if setstate is not None:
+                setstate(state)
+            else:
+                slotstate = None
+                if isinstance(state, tuple) and len(state) == 2:
+                    state, slotstate = state
+                if state is not None:
+                    instance.__dict__.update(state)
+                if slotstate is not None:
+                    for key, value in slotstate.items():
+                        setattr(instance, key, value)
     dispatch[pickle.BUILD[0]] = load_build
 
 def load_compatibility(filename):
@@ -127,4 +170,7 @@ def load_compatibility(filename):
     This function can load numpy array files saved separately during the
     dump.
     """
-    pass
+    with open(filename, 'rb') as file_handle:
+        unpickler = ZipNumpyUnpickler(filename, file_handle)
+        obj = unpickler.load()
+    return obj
