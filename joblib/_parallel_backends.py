@@ -47,12 +47,14 @@ class ParallelBackendBase(metaclass=ABCMeta):
         scheduling overhead and better use of CPU cache prefetching heuristics)
         as long as all the workers have enough work to do.
         """
-        pass
+        if n_jobs == -1:
+            return cpu_count()
+        return max(1, min(n_jobs, cpu_count()))
 
     @abstractmethod
     def apply_async(self, func, callback=None):
         """Schedule a func to be run"""
-        pass
+        raise NotImplementedError("Method 'apply_async' must be implemented in derived classes.")
 
     def retrieve_result_callback(self, out):
         """Called within the callback function passed in apply_async.
@@ -61,7 +63,7 @@ class ParallelBackendBase(metaclass=ABCMeta):
         the considered backend. It is supposed to return the outcome of a task
         if it succeeded or raise the exception if it failed.
         """
-        pass
+        return out
 
     def configure(self, n_jobs=1, parallel=None, prefer=None, require=None, **backend_args):
         """Reconfigure the backend and return the number of workers.
@@ -69,7 +71,9 @@ class ParallelBackendBase(metaclass=ABCMeta):
         This makes it possible to reuse an existing backend instance for
         successive independent calls to Parallel with different parameters.
         """
-        pass
+        self.parallel = parallel
+        self.n_jobs = self.effective_n_jobs(n_jobs)
+        return self.n_jobs
 
     def start_call(self):
         """Call-back method called at the beginning of a Parallel call"""
@@ -85,7 +89,7 @@ class ParallelBackendBase(metaclass=ABCMeta):
 
     def compute_batch_size(self):
         """Determine the optimal batch size"""
-        pass
+        return 1
 
     def batch_completed(self, batch_size, duration):
         """Callback indicate how long it took to run a batch"""
@@ -93,7 +97,7 @@ class ParallelBackendBase(metaclass=ABCMeta):
 
     def get_exceptions(self):
         """List of exception types to be captured."""
-        pass
+        return []
 
     def abort_everything(self, ensure_ready=True):
         """Abort any running tasks
@@ -115,7 +119,11 @@ class ParallelBackendBase(metaclass=ABCMeta):
         managed by the backend it-self: if we expect no new tasks, there is no
         point in re-creating new workers.
         """
-        pass
+        if ensure_ready:
+            self.terminate()
+            self.configure(self.n_jobs)
+        else:
+            self.terminate()
 
     def get_nested_backend(self):
         """Backend instance to be used by nested Parallel calls.
@@ -124,7 +132,11 @@ class ParallelBackendBase(metaclass=ABCMeta):
         nesting. Beyond, switch to sequential backend to avoid spawning too
         many threads on the host.
         """
-        pass
+        nesting_level = getattr(self, 'nesting_level', 0) + 1
+        if nesting_level > 1:
+            return SequentialBackend(nesting_level=nesting_level)
+        else:
+            return ThreadingBackend(nesting_level=nesting_level)
 
     @contextlib.contextmanager
     def retrieval_context(self):
@@ -141,7 +153,7 @@ class ParallelBackendBase(metaclass=ABCMeta):
         calls to finish, but the backend has no free workers to execute those
         tasks.
         """
-        pass
+        yield
 
     def _prepare_worker_env(self, n_jobs):
         """Return environment variables limiting threadpools in external libs.
@@ -151,7 +163,13 @@ class ParallelBackendBase(metaclass=ABCMeta):
         number of threads to `n_threads` for OpenMP, MKL, Accelerated and
         OpenBLAS libraries in the child processes.
         """
-        pass
+        env = {}
+        if self.inner_max_num_threads is not None:
+            n_threads = str(max(1, self.inner_max_num_threads))
+            for var in self.MAX_NUM_THREADS_VARS:
+                env[var] = n_threads
+            env[self.TBB_ENABLE_IPC_VAR] = '0'
+        return env
 
 class SequentialBackend(ParallelBackendBase):
     """A ParallelBackend which will execute all batches sequentially.
@@ -166,11 +184,14 @@ class SequentialBackend(ParallelBackendBase):
 
     def effective_n_jobs(self, n_jobs):
         """Determine the number of jobs which are going to run in parallel"""
-        pass
+        return 1
 
     def apply_async(self, func, callback=None):
         """Schedule a func to be run"""
-        pass
+        result = func()
+        if callback is not None:
+            callback(result)
+        return result
 
 class PoolManagerMixin(object):
     """A helper class for managing pool of workers."""
@@ -178,27 +199,37 @@ class PoolManagerMixin(object):
 
     def effective_n_jobs(self, n_jobs):
         """Determine the number of jobs which are going to run in parallel"""
-        pass
+        if n_jobs == -1:
+            return cpu_count()
+        return max(1, min(n_jobs, cpu_count()))
 
     def terminate(self):
         """Shutdown the process or thread pool"""
-        pass
+        if self._pool is not None:
+            self._pool.terminate()
+            self._pool = None
 
     def _get_pool(self):
         """Used by apply_async to make it possible to implement lazy init"""
-        pass
+        if self._pool is None:
+            self._pool = self._create_pool()
+        return self._pool
 
     def apply_async(self, func, callback=None):
         """Schedule a func to be run"""
-        pass
+        return self._get_pool().apply_async(func, callback=callback)
 
     def retrieve_result_callback(self, out):
         """Mimic concurrent.futures results, raising an error if needed."""
-        pass
+        if isinstance(out, BaseException):
+            raise out
+        return out
 
     def abort_everything(self, ensure_ready=True):
         """Shutdown the pool and restart a new one with the same parameters"""
-        pass
+        self.terminate()
+        if ensure_ready:
+            self._pool = self._create_pool()
 
 class AutoBatchingMixin(object):
     """A helper class for automagically batching jobs."""
@@ -214,18 +245,33 @@ class AutoBatchingMixin(object):
 
     def compute_batch_size(self):
         """Determine the optimal batch size"""
-        pass
+        ideal_batch_duration = (self.MIN_IDEAL_BATCH_DURATION +
+                                self.MAX_IDEAL_BATCH_DURATION) / 2
+        if self._smoothed_batch_duration > 0:
+            return int(ideal_batch_duration / self._smoothed_batch_duration *
+                       self._effective_batch_size)
+        else:
+            return self._effective_batch_size
 
     def batch_completed(self, batch_size, duration):
         """Callback indicate how long it took to run a batch"""
-        pass
+        if batch_size == 0:
+            return
+        if self._smoothed_batch_duration == 0:
+            self._smoothed_batch_duration = duration
+        else:
+            alpha = 0.8
+            self._smoothed_batch_duration = (
+                alpha * duration + (1 - alpha) * self._smoothed_batch_duration)
+        self._effective_batch_size = batch_size
 
     def reset_batch_stats(self):
         """Reset batch statistics to default values.
 
         This avoids interferences with future jobs.
         """
-        pass
+        self._effective_batch_size = self._DEFAULT_EFFECTIVE_BATCH_SIZE
+        self._smoothed_batch_duration = self._DEFAULT_SMOOTHED_BATCH_DURATION
 
 class ThreadingBackend(PoolManagerMixin, ParallelBackendBase):
     """A ParallelBackend which will use a thread pool to execute batches in.
@@ -247,7 +293,9 @@ class ThreadingBackend(PoolManagerMixin, ParallelBackendBase):
 
     def configure(self, n_jobs=1, parallel=None, **backend_args):
         """Build a process or thread pool and return the number of workers"""
-        pass
+        self.parallel = parallel
+        self.n_jobs = self.effective_n_jobs(n_jobs)
+        return self.n_jobs
 
     def _get_pool(self):
         """Lazily initialize the thread pool
@@ -255,7 +303,9 @@ class ThreadingBackend(PoolManagerMixin, ParallelBackendBase):
         The actual pool of worker threads is only initialized at the first
         call to apply_async.
         """
-        pass
+        if self._pool is None:
+            self._pool = ThreadPool(self.n_jobs)
+        return self._pool
 
 class MultiprocessingBackend(PoolManagerMixin, AutoBatchingMixin, ParallelBackendBase):
     """A ParallelBackend which will use a multiprocessing.Pool.
@@ -273,15 +323,33 @@ class MultiprocessingBackend(PoolManagerMixin, AutoBatchingMixin, ParallelBacken
         This also checks if we are attempting to create a nested parallel
         loop.
         """
-        pass
+        if mp is None:
+            return 1
+
+        if self.nesting_level is not None and self.nesting_level > 0:
+            return 1
+
+        if n_jobs == -1:
+            n_jobs = cpu_count()
+        elif n_jobs < 0:
+            raise ValueError('n_jobs must be 1 or greater')
+
+        return n_jobs
 
     def configure(self, n_jobs=1, parallel=None, prefer=None, require=None, **memmappingpool_args):
         """Build a process or thread pool and return the number of workers"""
-        pass
+        n_jobs = self.effective_n_jobs(n_jobs)
+        self.parallel = parallel
+        self._n_jobs = n_jobs
+        self._pool = None
+        self._temp_folder = memmappingpool_args.pop('temp_folder', None)
+        return n_jobs
 
     def terminate(self):
         """Shutdown the process or thread pool"""
-        pass
+        if self._pool is not None:
+            self._pool.terminate()
+            self._pool = None
 
 class LokyBackend(AutoBatchingMixin, ParallelBackendBase):
     """Managing pool of workers with loky instead of multiprocessing."""
@@ -290,20 +358,32 @@ class LokyBackend(AutoBatchingMixin, ParallelBackendBase):
 
     def configure(self, n_jobs=1, parallel=None, prefer=None, require=None, idle_worker_timeout=300, **memmappingexecutor_args):
         """Build a process executor and return the number of workers"""
-        pass
+        n_jobs = self.effective_n_jobs(n_jobs)
+        self.parallel = parallel
+        self._n_jobs = n_jobs
+        self._idle_worker_timeout = idle_worker_timeout
+        self._memmappingexecutor_args = memmappingexecutor_args
+        return n_jobs
 
     def effective_n_jobs(self, n_jobs):
         """Determine the number of jobs which are going to run in parallel"""
-        pass
+        if n_jobs == -1:
+            n_jobs = cpu_count()
+        return max(1, min(n_jobs, cpu_count()))
 
     def apply_async(self, func, callback=None):
         """Schedule a func to be run"""
-        pass
+        future = self._get_executor().submit(func)
+        if callback is not None:
+            future.add_done_callback(lambda f: callback(f.result()))
+        return future
 
     def abort_everything(self, ensure_ready=True):
         """Shutdown the workers and restart a new one with the same parameters
         """
-        pass
+        self._executor_shutdown(kill_workers=True)
+        if ensure_ready:
+            self._executor = None
 
 class FallbackToBackend(Exception):
     """Raised when configuration should fallback to another backend"""
@@ -314,4 +394,9 @@ class FallbackToBackend(Exception):
 def inside_dask_worker():
     """Check whether the current function is executed inside a Dask worker.
     """
-    pass
+    try:
+        from distributed.worker import get_worker
+        get_worker()
+        return True
+    except (ImportError, ValueError):
+        return False
