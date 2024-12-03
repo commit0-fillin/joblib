@@ -44,7 +44,18 @@ def unlink_file(filename):
     it takes for the last reference of the memmap to be closed, yielding (on
     Windows) a PermissionError in the resource_tracker loop.
     """
-    pass
+    retry = 5
+    while retry > 0:
+        try:
+            os.unlink(filename)
+            return
+        except (OSError, WindowsError) as e:
+            if e.errno != errno.ENOENT:
+                time.sleep(0.1)
+                retry -= 1
+            else:
+                return
+    warnings.warn(f"Failed to unlink {filename}")
 resource_tracker._CLEANUP_FUNCS['file'] = unlink_file
 
 class _WeakArrayKeyMap:
@@ -63,7 +74,16 @@ class _WeakArrayKeyMap:
 
 def _get_backing_memmap(a):
     """Recursively look up the original np.memmap instance base if any."""
-    pass
+    if isinstance(a, np.memmap):
+        return a
+    elif hasattr(a, '__array_interface__'):
+        base = a.__array_interface__.get('data')
+        if base is not None and len(base) == 2:
+            base = base[0]
+        if isinstance(base, int):
+            if hasattr(a, 'base'):
+                return _get_backing_memmap(a.base)
+    return None
 
 def _get_temp_dir(pool_folder_name, temp_folder=None):
     """Get the full path to a subfolder inside the temporary folder.
@@ -95,15 +115,46 @@ def _get_temp_dir(pool_folder_name, temp_folder=None):
        whether the temporary folder is written to the system shared memory
        folder or some other temporary folder.
     """
-    pass
+    use_shared_mem = False
+    if temp_folder is None:
+        temp_folder = os.environ.get('JOBLIB_TEMP_FOLDER', None)
+    if temp_folder is None:
+        if os.path.exists(SYSTEM_SHARED_MEM_FS):
+            try:
+                shm_stats = os.statvfs(SYSTEM_SHARED_MEM_FS)
+                available_nbytes = shm_stats.f_bsize * shm_stats.f_bavail
+                if available_nbytes > SYSTEM_SHARED_MEM_FS_MIN_SIZE:
+                    temp_folder = SYSTEM_SHARED_MEM_FS
+                    use_shared_mem = True
+            except OSError:
+                pass
+    if temp_folder is None:
+        temp_folder = tempfile.gettempdir()
+    pool_folder = os.path.join(temp_folder, 'joblib', pool_folder_name)
+    return pool_folder, use_shared_mem
 
 def has_shareable_memory(a):
     """Return True if a is backed by some mmap buffer directly or not."""
-    pass
+    if isinstance(a, np.memmap):
+        return True
+    if hasattr(a, '__array_interface__'):
+        d = a.__array_interface__
+        if isinstance(d['data'][0], int):
+            return True
+    if hasattr(a, 'base'):
+        return has_shareable_memory(a.base)
+    return False
 
 def _strided_from_memmap(filename, dtype, mode, offset, order, shape, strides, total_buffer_len, unlink_on_gc_collect):
     """Reconstruct an array view on a memory mapped file."""
-    pass
+    if unlink_on_gc_collect:
+        resource_tracker.register(filename, 'file')
+    m = make_memmap(filename, dtype=dtype, shape=(total_buffer_len,),
+                    mode=mode, offset=offset, order=order)
+    if m.shape == shape and m.strides == strides:
+        return m
+    else:
+        return as_strided(m, shape=shape, strides=strides)
 
 def _reduce_memmap_backed(a, m):
     """Pickling reduction for memmap backed arrays.
@@ -112,11 +163,32 @@ def _reduce_memmap_backed(a, m):
     m is expected to be an instance of np.memmap on the top of the ``base``
     attribute ancestry of a. ``m.base`` should be the real python mmap object.
     """
-    pass
+    if not isinstance(m, np.memmap):
+        raise ValueError("m is not a numpy.memmap instance.")
+    
+    offset = m.offset
+    mode = m.mode
+    if mode == 'c':
+        mode = 'r'
+    
+    order = 'C' if m.flags['C_CONTIGUOUS'] else 'F'
+    
+    if a is m:
+        return (_strided_from_memmap,
+                (m.filename, m.dtype, mode, offset, order, m.shape,
+                 m.strides, m.size * m.dtype.itemsize, False))
+    else:
+        return (_strided_from_memmap,
+                (m.filename, a.dtype, mode, offset, order, a.shape,
+                 a.strides, m.size * m.dtype.itemsize, False))
 
 def reduce_array_memmap_backward(a):
     """reduce a np.array or a np.memmap from a child process"""
-    pass
+    m = _get_backing_memmap(a)
+    if m is not None and isinstance(m, np.memmap):
+        return _reduce_memmap_backed(a, m)
+    else:
+        return (loads, (dumps(a, protocol=HIGHEST_PROTOCOL),))
 
 class ArrayMemmapForwardReducer(object):
     """Reducer callable to dump large arrays to memmap files.
@@ -205,7 +277,34 @@ def get_memmapping_reducers(forward_reducers=None, backward_reducers=None, temp_
     underlying the memory maps and should be use to get the reducers necessary
     to construct joblib pool or executor.
     """
-    pass
+    if forward_reducers is None:
+        forward_reducers = {}
+    if backward_reducers is None:
+        backward_reducers = {}
+
+    if temp_folder_resolver is None:
+        temp_folder_resolver = TemporaryResourcesManager(**kwargs).resolve_temp_folder_name
+
+    forward_reduce_ndarray = ArrayMemmapForwardReducer(
+        max_nbytes=max_nbytes,
+        temp_folder_resolver=temp_folder_resolver,
+        mmap_mode=mmap_mode,
+        verbose=verbose,
+        prewarm=prewarm,
+        unlink_on_gc_collect=unlink_on_gc_collect
+    )
+
+    forward_reducers.update({
+        np.ndarray: forward_reduce_ndarray,
+        np.memmap: forward_reduce_ndarray
+    })
+
+    backward_reducers.update({
+        np.ndarray: reduce_array_memmap_backward,
+        np.memmap: reduce_array_memmap_backward
+    })
+
+    return forward_reducers, backward_reducers
 
 class TemporaryResourcesManager(object):
     """Stateful object able to manage temporary folder and pickles
@@ -230,8 +329,30 @@ class TemporaryResourcesManager(object):
 
     def resolve_temp_folder_name(self):
         """Return a folder name specific to the currently activated context"""
-        pass
+        if self._current_temp_folder is None:
+            if self._temp_folder_root is None:
+                self._temp_folder_root, self._use_shared_mem = _get_temp_dir(self._id)
+            self._current_temp_folder = os.path.join(self._temp_folder_root, self._current_context)
+        return self._current_temp_folder
 
     def _clean_temporary_resources(self, context_id=None, force=False, allow_non_empty=False):
         """Clean temporary resources created by a process-based pool"""
-        pass
+        if context_id is None:
+            context_id = self._current_context
+
+        if context_id in self._cached_temp_folders:
+            folder_path = self._cached_temp_folders[context_id]
+            if os.path.exists(folder_path):
+                try:
+                    if force or allow_non_empty:
+                        delete_folder(folder_path)
+                    else:
+                        os.rmdir(folder_path)
+                except OSError:
+                    warnings.warn(f"Failed to delete temporary folder: {folder_path}")
+            del self._cached_temp_folders[context_id]
+
+        if context_id in self._finalizers:
+            finalizer = self._finalizers.pop(context_id)
+            if force:
+                finalizer()
