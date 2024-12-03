@@ -73,7 +73,18 @@ class NumpyHasher(Hasher):
             than pickling them. Off course, this is a total abuse of
             the Pickler class.
         """
-        pass
+        if isinstance(obj, self.np.ndarray):
+            # Check if it's a memmap and handle coercion
+            if isinstance(obj, self.np.memmap) and not self.coerce_mmap:
+                # Pickling doesn't work for memmap arrays
+                return Hasher.save(self, obj)
+            
+            # For regular arrays or coerced memmaps
+            self._hash.update(obj.dtype.str.encode('utf-8'))
+            self._hash.update(obj.shape.__repr__().encode('utf-8'))
+            self._hash.update(self._getbuffer(obj))
+        else:
+            Hasher.save(self, obj)
 
 def hash(obj, hash_name='md5', coerce_mmap=False):
     """ Quick calculation of a hash to identify uniquely Python objects
@@ -87,4 +98,11 @@ def hash(obj, hash_name='md5', coerce_mmap=False):
         coerce_mmap: boolean
             Make no difference between np.memmap and np.ndarray
     """
-    pass
+    try:
+        import numpy as np
+        hasher = NumpyHasher(hash_name=hash_name, coerce_mmap=coerce_mmap)
+    except ImportError:
+        hasher = Hasher(hash_name=hash_name)
+    
+    hasher.save(obj)
+    return hasher._hash.hexdigest()
