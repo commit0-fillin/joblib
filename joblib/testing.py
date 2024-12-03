@@ -22,7 +22,15 @@ param = pytest.param
 def warnings_to_stdout():
     """ Redirect all warnings to stdout.
     """
-    pass
+    warnings.filterwarnings("always")
+    warnings.simplefilter("always")
+    for warning in warnings.filters:
+        warnings.filterwarnings("always", category=warning[2])
+    
+    old_showwarning = warnings.showwarning
+    def showwarning(message, category, filename, lineno, file=None, line=None):
+        sys.stdout.write(warnings.formatwarning(message, category, filename, lineno, line))
+    warnings.showwarning = showwarning
 
 def check_subprocess_call(cmd, timeout=5, stdout_regex=None, stderr_regex=None):
     """Runs a command in a subprocess with timeout in seconds.
@@ -33,4 +41,27 @@ def check_subprocess_call(cmd, timeout=5, stdout_regex=None, stderr_regex=None):
     Also checks returncode is zero, stdout if stdout_regex is set, and
     stderr if stderr_regex is set.
     """
-    pass
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+
+    returncode = process.returncode
+
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd, stdout, stderr)
+
+    if stdout_regex and not re.search(stdout_regex, stdout):
+        raise AssertionError(f"Stdout did not match regex: {stdout_regex}\nStdout: {stdout}")
+
+    if stderr_regex and not re.search(stderr_regex, stderr):
+        raise AssertionError(f"Stderr did not match regex: {stderr_regex}\nStderr: {stderr}")
+
+    return stdout, stderr
