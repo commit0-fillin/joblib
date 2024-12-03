@@ -24,7 +24,14 @@ class CacheWarning(Warning):
 
 def concurrency_safe_write(object_to_write, filename, write_func):
     """Writes an object into a unique file in a concurrency-safe way."""
-    pass
+    temporary_filename = filename + '.tmp'
+    try:
+        with open(temporary_filename, 'wb') as f:
+            write_func(object_to_write, f)
+        concurrency_safe_rename(temporary_filename, filename)
+    except:
+        os.remove(temporary_filename)
+        raise
 
 class StoreBackendBase(metaclass=ABCMeta):
     """Helper Abstract Base Class which defines all methods that
@@ -49,7 +56,7 @@ class StoreBackendBase(metaclass=ABCMeta):
         -------
         a file-like object
         """
-        pass
+        return open(f, mode)
 
     @abstractmethod
     def _item_exists(self, location):
@@ -67,7 +74,7 @@ class StoreBackendBase(metaclass=ABCMeta):
         -------
         True if the item exists, False otherwise
         """
-        pass
+        return os.path.exists(location)
 
     @abstractmethod
     def _move_item(self, src, dst):
@@ -82,7 +89,7 @@ class StoreBackendBase(metaclass=ABCMeta):
         dst: string
             The destination location of an item
         """
-        pass
+        concurrency_safe_rename(src, dst)
 
     @abstractmethod
     def create_location(self, location):
@@ -94,7 +101,7 @@ class StoreBackendBase(metaclass=ABCMeta):
             The location in the store. On a filesystem, this corresponds to a
             directory.
         """
-        pass
+        os.makedirs(location, exist_ok=True)
 
     @abstractmethod
     def clear_location(self, location):
@@ -106,7 +113,10 @@ class StoreBackendBase(metaclass=ABCMeta):
             The location in the store. On a filesystem, this corresponds to a
             directory or a filename absolute path
         """
-        pass
+        if os.path.isdir(location):
+            shutil.rmtree(location)
+        elif os.path.isfile(location):
+            os.remove(location)
 
     @abstractmethod
     def get_items(self):
@@ -117,7 +127,11 @@ class StoreBackendBase(metaclass=ABCMeta):
         The list of items identified by their ids (e.g filename in a
         filesystem).
         """
-        pass
+        items = []
+        for root, dirs, files in os.walk(self.location):
+            for file in files:
+                items.append(os.path.join(root, file))
+        return items
 
     @abstractmethod
     def configure(self, location, verbose=0, backend_options=dict()):
@@ -134,7 +148,10 @@ class StoreBackendBase(metaclass=ABCMeta):
             Contains a dictionary of named parameters used to configure the
             store backend.
         """
-        pass
+        self.location = location
+        self.verbose = verbose
+        self.backend_options = backend_options
+        self.create_location(location)
 
 class StoreBackendMixin(object):
     """Class providing all logic for managing the store in a generic way.
