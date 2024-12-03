@@ -15,7 +15,7 @@ def eval_expr(expr):
     >>> eval_expr('1 + 2*3**(4) / (6 + -7)')
     -161.0
     """
-    pass
+    return eval(expr, {"__builtins__": None}, operators)
 
 @dataclass(frozen=True)
 class _Sentinel:
