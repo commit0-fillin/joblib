@@ -62,7 +62,15 @@ class _WeakKeyDictionary:
 
 def _make_tasks_summary(tasks):
     """Summarize of list of (func, args, kwargs) function calls"""
-    pass
+    num_tasks = len(tasks)
+    if num_tasks == 0:
+        return 0, False, ''
+    
+    first_func = tasks[0][0]
+    mixed = any(task[0] != first_func for task in tasks[1:])
+    funcname = funcname(first_func)
+    
+    return num_tasks, mixed, funcname
 
 class Batch:
     """dask-compatible wrapper that executes a batch of tasks"""
@@ -127,7 +135,12 @@ class DaskDistributedBackend(AutoBatchingMixin, ParallelBackendBase):
 
         joblib.Parallel will never access those results
         """
-        pass
+        if ensure_ready:
+            self.client.cancel(list(self._results.keys()))
+        self._results.clear()
+        self._callbacks.clear()
+        # Reset the waiting_futures to an empty as_completed object
+        self.waiting_futures = as_completed([], loop=self.client.loop, with_results=True, raise_errors=False)
 
     @contextlib.contextmanager
     def retrieval_context(self):
@@ -136,4 +149,13 @@ class DaskDistributedBackend(AutoBatchingMixin, ParallelBackendBase):
         This removes thread from the worker's thread pool (using 'secede').
         Seceding avoids deadlock in nested parallelism settings.
         """
-        pass
+        if hasattr(thread_state, 'execution_state'):
+            # We are inside a worker's thread, so secede to avoid deadlocks
+            secede()
+            try:
+                yield
+            finally:
+                rejoin()
+        else:
+            # We are in the client's thread, no need to secede
+            yield
