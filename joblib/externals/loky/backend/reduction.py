@@ -32,7 +32,19 @@ set_loky_pickler()
 
 def dump(obj, file, reducers=None, protocol=None):
     """Replacement for pickle.dump() using _LokyPickler."""
-    pass
+    if protocol is None:
+        protocol = HIGHEST_PROTOCOL
+    
+    if reducers is None:
+        reducers = _dispatch_table
+
+    pickler = _LokyPickler(file, protocol=protocol)
+    
+    # Register custom reducers
+    for type_, reducer in reducers.items():
+        pickler.register(type_, reducer)
+    
+    pickler.dump(obj)
 __all__ = ['dump', 'dumps', 'loads', 'register', 'set_loky_pickler']
 if sys.platform == 'win32':
     from multiprocessing.reduction import duplicate
