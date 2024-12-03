@@ -17,7 +17,11 @@ def _get_next_executor_id():
     The purpose of this monotonic id is to help debug and test automated
     instance creation.
     """
-    pass
+    global _next_executor_id
+    with _executor_lock:
+        executor_id = _next_executor_id
+        _next_executor_id += 1
+    return executor_id
 
 def get_reusable_executor(max_workers=None, context=None, timeout=10, kill_workers=False, reuse='auto', job_reducers=None, result_reducers=None, initializer=None, initargs=(), env=None):
     """Return the current ReusableExectutor instance.
@@ -60,7 +64,25 @@ def get_reusable_executor(max_workers=None, context=None, timeout=10, kill_worke
     in the children before any module is loaded. This only works with the
     ``loky`` context.
     """
-    pass
+    global _executor, _executor_kwargs
+    executor_kwargs = dict(
+        max_workers=max_workers, context=context, timeout=timeout,
+        kill_workers=kill_workers, job_reducers=job_reducers,
+        result_reducers=result_reducers, initializer=initializer,
+        initargs=initargs, env=env
+    )
+    
+    with _executor_lock:
+        if _executor is None or _executor_kwargs != executor_kwargs or kill_workers:
+            if _executor is not None:
+                _executor.shutdown(wait=True)
+            _executor = _ReusablePoolExecutor(**executor_kwargs)
+            _executor_kwargs = executor_kwargs
+        elif _executor.max_workers != max_workers:
+            _executor._max_workers = max_workers
+            _executor._resize_worker_pool()
+    
+    return _executor
 
 class _ReusablePoolExecutor(ProcessPoolExecutor):
 
@@ -71,4 +93,7 @@ class _ReusablePoolExecutor(ProcessPoolExecutor):
 
     def _wait_job_completion(self):
         """Wait for the cache to be empty before resizing the pool."""
-        pass
+        while len(self._pending_work_items) > 0:
+            sleep(0.1)
+        while len(self._running_work_items) > 0:
+            sleep(0.1)
