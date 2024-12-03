@@ -860,6 +860,7 @@ class Parallel(Logger):
         if self.return_generator and self._calling:
             self._abort()
         self._terminate_and_reset()
+        setattr(_backend, 'config', self.old_parallel_config)
 
     def _initialize_backend(self):
         """Build a process or thread pool and return the number of workers"""
