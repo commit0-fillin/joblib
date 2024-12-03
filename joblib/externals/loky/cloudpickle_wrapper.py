@@ -34,4 +34,12 @@ def wrap_non_picklable_objects(obj, keep_wrapper=True):
     objects in the main scripts and to implement __reduce__ functions for
     complex classes.
     """
-    pass
+    if isinstance(obj, partial):
+        # Handle partial functions
+        return obj
+    elif callable(obj):
+        # Handle callable objects (including functions)
+        return CallableObjectWrapper(obj, keep_wrapper=keep_wrapper)
+    else:
+        # Handle non-callable objects
+        return CloudpickledObjectWrapper(obj, keep_wrapper=keep_wrapper)
