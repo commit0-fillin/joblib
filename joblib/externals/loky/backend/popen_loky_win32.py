@@ -56,12 +56,45 @@ class Popen(_Popen):
 
 def get_command_line(pipe_handle, parent_pid, **kwds):
     """Returns prefix of command line used for spawning a child process."""
-    pass
+    from . import spawn
+    from .context import get_context
+    
+    prog = f'from {__name__} import main; main()'
+    opts = {'pipe_handle': pipe_handle, 'parent_pid': parent_pid, **kwds}
+    
+    return [
+        sys.executable,
+        '-c',
+        prog,
+        '--pipe=' + str(pipe_handle),
+        '--parent=' + str(parent_pid)
+    ] + [f'--{k}={v}' for k, v in opts.items() if k not in ('pipe_handle', 'parent_pid')]
 
 def is_forking(argv):
     """Return whether commandline indicates we are forking."""
-    pass
+    return len(argv) >= 2 and argv[1] == '--multiprocessing-fork'
 
 def main(pipe_handle, parent_pid=None):
     """Run code specified by data received over pipe."""
-    pass
+    from . import spawn
+    from .reduction import loads
+    
+    # Retrieve the preparation data
+    with os.fdopen(msvcrt.open_osfhandle(pipe_handle, os.O_RDONLY), 'rb') as from_parent:
+        preparation_data = loads(from_parent.read())
+    
+    # Prepare the process
+    spawn.prepare(preparation_data, parent_sentinel=pipe_handle)
+    
+    # Get the process object
+    from_parent = os.fdopen(msvcrt.open_osfhandle(pipe_handle, os.O_RDONLY), 'rb')
+    process_obj = loads(from_parent.read())
+    from_parent.close()
+
+    # Start the process
+    self = process.current_process()
+    self._inheriting = True
+    try:
+        process_obj._bootstrap()
+    finally:
+        self._inheriting = False
