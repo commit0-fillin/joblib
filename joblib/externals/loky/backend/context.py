@@ -46,11 +46,71 @@ def cpu_count(only_physical_cores=False):
 
     It is also always larger or equal to 1.
     """
-    pass
+    import multiprocessing
+    import os
+
+    # Get the number of CPUs from the system
+    try:
+        system_cpu_count = multiprocessing.cpu_count()
+    except NotImplementedError:
+        system_cpu_count = 1
+
+    # Check for CPU affinity (Unix systems)
+    try:
+        import psutil
+        process = psutil.Process()
+        affinity_cpu_count = len(process.cpu_affinity())
+    except (ImportError, AttributeError):
+        affinity_cpu_count = system_cpu_count
+
+    # Check for Cgroup CPU bandwidth limit (Linux only)
+    cgroup_cpu_count = float('inf')
+    if sys.platform.startswith('linux'):
+        try:
+            with open('/sys/fs/cgroup/cpu/cpu.cfs_quota_us') as f:
+                quota = int(f.read())
+            with open('/sys/fs/cgroup/cpu/cpu.cfs_period_us') as f:
+                period = int(f.read())
+            if quota > 0 and period > 0:
+                cgroup_cpu_count = max(1, int(quota / period))
+        except:
+            pass
+
+    # Check for LOKY_MAX_CPU_COUNT environment variable
+    env_cpu_count = int(os.environ.get('LOKY_MAX_CPU_COUNT', float('inf')))
+
+    # Get the minimum of all constraints
+    cpu_count = min(system_cpu_count, affinity_cpu_count, cgroup_cpu_count, env_cpu_count)
+
+    # Handle physical cores if requested
+    if only_physical_cores:
+        physical_cores, _ = _count_physical_cores()
+        if physical_cores != "not found":
+            cpu_count = min(cpu_count, physical_cores)
+
+    # Ensure the count is at least 1 and doesn't exceed the Windows limit
+    if sys.platform == 'win32':
+        cpu_count = min(cpu_count, _MAX_WINDOWS_WORKERS)
+
+    return max(1, cpu_count)
 
 def _cpu_count_user(os_cpu_count):
     """Number of user defined available CPUs"""
-    pass
+    import os
+    cpu_count_user = os.environ.get('LOKY_MAX_CPU_COUNT')
+    if cpu_count_user is not None:
+        try:
+            cpu_count_user = int(cpu_count_user)
+        except ValueError:
+            print(f"LOKY_MAX_CPU_COUNT should be an int. Got '{cpu_count_user}'. "
+                  "Defaulting to os.cpu_count().")
+            return os_cpu_count
+        if cpu_count_user < 1:
+            print(f"LOKY_MAX_CPU_COUNT should be >= 1. Got {cpu_count_user}. "
+                  "Defaulting to os.cpu_count().")
+            return os_cpu_count
+        return min(cpu_count_user, os_cpu_count)
+    return os_cpu_count
 
 def _count_physical_cores():
     """Return a tuple (number of physical cores, exception)
@@ -60,7 +120,36 @@ def _count_physical_cores():
 
     The number of physical cores is cached to avoid repeating subprocess calls.
     """
-    pass
+    global physical_cores_cache
+
+    if physical_cores_cache is not None:
+        return physical_cores_cache
+
+    import subprocess
+
+    try:
+        if sys.platform == 'linux':
+            # Try to use lscpu
+            output = subprocess.check_output(['lscpu', '-p=Core,Socket']).decode()
+            core_socket_pairs = {tuple(line.split(',')) for line in output.splitlines()
+                                 if not line.startswith('#')}
+            num_physical_cores = len(core_socket_pairs)
+        elif sys.platform == 'darwin':
+            # Try to use sysctl on macOS
+            output = subprocess.check_output(['sysctl', '-n', 'hw.physicalcpu']).decode()
+            num_physical_cores = int(output.strip())
+        elif sys.platform == 'win32':
+            # Try to use wmic on Windows
+            output = subprocess.check_output(['wmic', 'cpu', 'get', 'NumberOfCores']).decode()
+            num_physical_cores = int(output.split('\n')[1].strip())
+        else:
+            raise NotImplementedError(f"Unsupported platform: {sys.platform}")
+
+        physical_cores_cache = (num_physical_cores, None)
+    except Exception as e:
+        physical_cores_cache = ("not found", e)
+
+    return physical_cores_cache
 
 class LokyContext(BaseContext):
     """Context relying on the LokyProcess."""
@@ -70,37 +159,45 @@ class LokyContext(BaseContext):
 
     def Queue(self, maxsize=0, reducers=None):
         """Returns a queue object"""
-        pass
+        from .queues import Queue
+        return Queue(maxsize, reducers=reducers, ctx=self.get_context())
 
     def SimpleQueue(self, reducers=None):
         """Returns a queue object"""
-        pass
+        from .queues import SimpleQueue
+        return SimpleQueue(reducers=reducers, ctx=self.get_context())
     if sys.platform != 'win32':
         'For Unix platform, use our custom implementation of synchronize\n        ensuring that we use the loky.backend.resource_tracker to clean-up\n        the semaphores in case of a worker crash.\n        '
 
         def Semaphore(self, value=1):
             """Returns a semaphore object"""
-            pass
+            from .synchronize import Semaphore
+            return Semaphore(value)
 
         def BoundedSemaphore(self, value):
             """Returns a bounded semaphore object"""
-            pass
+            from .synchronize import BoundedSemaphore
+            return BoundedSemaphore(value)
 
         def Lock(self):
             """Returns a lock object"""
-            pass
+            from .synchronize import Lock
+            return Lock()
 
         def RLock(self):
             """Returns a recurrent lock object"""
-            pass
+            from .synchronize import RLock
+            return RLock()
 
         def Condition(self, lock=None):
             """Returns a condition object"""
-            pass
+            from .synchronize import Condition
+            return Condition(lock)
 
         def Event(self):
             """Returns an event object"""
-            pass
+            from .synchronize import Event
+            return Event()
 
 class LokyInitMainContext(LokyContext):
     """Extra context with LokyProcess, which does load the main module
